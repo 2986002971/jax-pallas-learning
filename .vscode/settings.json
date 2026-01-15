@@ -10,5 +10,6 @@
                 "cmd": "echo 'Detected PY file save...' && jupytext --to md \"${file}\""
             }
         ]
-    }
+    },
+    "notebook.output.textLineLimit": 180
 }
