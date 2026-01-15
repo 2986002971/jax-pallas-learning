@@ -1,0 +1,14 @@
+{
+    "emeraldwalk.runonsave": {
+        "commands": [
+            {
+                "match": "\\.md$",
+                "cmd": "echo 'Detected MD file save...' && jupytext --to py:percent \"${file}\""
+            },
+            {
+                "match": "\\.py$",
+                "cmd": "echo 'Detected PY file save...' && jupytext --to md \"${file}\""
+            }
+        ]
+    }
+}

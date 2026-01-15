@@ -20,6 +20,7 @@
 ```python
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 # 一个典型的 PyTree：模型参数
 params = {
@@ -119,7 +120,6 @@ class MyLinear:
     有一个全局的随机数发生器（Global RNG）。每次你调用 `rand()`，它会在后台偷偷更新内部状态。
 ```python
 # NumPy
-import numpy as np
 
 np.random.seed(0)
 print(np.random.rand())  # 0.548...
@@ -132,7 +132,6 @@ print(np.random.rand())  # 0.715... (状态变了，但你看不见)
 
 ##### A. 为什么两次调用结果一样？
 ```python
-import jax
 
 key = jax.random.PRNGKey(42)
 
