@@ -194,7 +194,7 @@ print(f"Keys shape: {keys.shape}")  # (8, 2)
 # ### 0. 基础设定：单体函数
 # 我们先写一个只负责初始化**一个**模型的函数。
 # 这是最符合人类直觉的写法，完全不需要考虑 Batch 维度。
-#
+
 
 # %%
 def init_single_layer(key, input_dim=10, output_dim=5):
@@ -205,8 +205,8 @@ def init_single_layer(key, input_dim=10, output_dim=5):
     k1, k2 = jax.random.split(key)
 
     # 初始化参数
-    w = jax.random.normal(k1, (input_dim, output_dim)) * 0.02
-    b = jax.random.normal(k2, (output_dim,)) * 0.1
+    w = jax.random.normal(k1, (input_dim, output_dim))
+    b = jax.random.normal(k2, (output_dim,))
 
     return {"w": w, "b": b}
 

@@ -169,6 +169,7 @@ keys = jax.random.split(master_key, num=8)
 print(f"Keys shape: {keys.shape}")  # (8, 2)
 ```
 
+
 我们可以看到，`keys` 是一个形状为 (8, 2) 的数组，每一行都是一个独立的 PRNG Key，可以用来初始化不同的模型。而每个key本身是一个长度为2的数组，这是JAX PRNG Key的标准格式。
 
 **1. 为什么一个不够？（容量问题）**
@@ -203,8 +204,8 @@ def init_single_layer(key, input_dim=10, output_dim=5):
     k1, k2 = jax.random.split(key)
 
     # 初始化参数
-    w = jax.random.normal(k1, (input_dim, output_dim)) * 0.02
-    b = jax.random.normal(k2, (output_dim,)) * 0.1
+    w = jax.random.normal(k1, (input_dim, output_dim))
+    b = jax.random.normal(k2, (output_dim,))
 
     return {"w": w, "b": b}
 
