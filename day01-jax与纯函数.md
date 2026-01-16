@@ -14,7 +14,7 @@
 
 这是 JAX 中最常用的工具箱。作为修炼者，你需要掌握以下三个函数：
 
-##### A. `tree_flatten` 與 `tree_unflatten` (解构与重构)
+##### A. `tree_flatten` 与 `tree_unflatten` (解构与重构)
 这是 JAX 内部视角的基石。
 
 ```python
@@ -113,7 +113,7 @@ class MyLinear:
 
 ### Part 2: JAX 的 PRNG 设计 —— 显式状态传递
 
-这是从 PyTorch/NumPy 转 JAX 最痛苦的地方。
+这是从 PyTorch/NumPy 转 JAX 最不适应的地方。
 
 #### 1. 核心差异：Stateful vs Stateless
 *   **NumPy/PyTorch (Stateful)**:
@@ -231,7 +231,7 @@ print("目前结构: [{'w':.., 'b':..}, ..., {'w':.., 'b':..}] (Array of Structu
 
 2. 手动堆叠 (为了变成 GPU 喜欢的 Tensor 格式)
 这一步通常很痛苦，需要再次遍历字典结构
-这里我们借用 tree_map 模拟一下手动堆叠的过程
+这里我们借用 tree_map 模拟一下手动堆叠的过程[[day01-jax与纯函数#B.  (结构映射)|tree map]]
 
 ```python
 stacked_params_manual = jax.tree_util.tree_map(
@@ -288,8 +288,4 @@ structure = jax.tree_util.tree_map(print_shape, batched_params_vmap)
 print(f"   Dict {{ 'w': BatchArray{structure['w']}, 'b': BatchArray{structure['b']} }}")
 print("   Vmap 自动帮我们把 Batch 维度放在了最前面 (Leading Dimension)。")
 print("   这意味着所有模型的 'w' 都在一块连续的内存里，可以一个指令并行计算所有模型！")
-```
-
-```python
-
 ```

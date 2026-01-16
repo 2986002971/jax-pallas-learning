@@ -15,7 +15,7 @@
 #
 # 这是 JAX 中最常用的工具箱。作为修炼者，你需要掌握以下三个函数：
 #
-# ##### A. `tree_flatten` 與 `tree_unflatten` (解构与重构)
+# ##### A. `tree_flatten` 与 `tree_unflatten` (解构与重构)
 # 这是 JAX 内部视角的基石。
 
 # %%
@@ -114,7 +114,7 @@ class MyLinear:
 #
 # ### Part 2: JAX 的 PRNG 设计 —— 显式状态传递
 #
-# 这是从 PyTorch/NumPy 转 JAX 最痛苦的地方。
+# 这是从 PyTorch/NumPy 转 JAX 最不适应的地方。
 #
 # #### 1. 核心差异：Stateful vs Stateless
 # *   **NumPy/PyTorch (Stateful)**:
@@ -169,19 +169,20 @@ master_key = jax.random.PRNGKey(42)
 keys = jax.random.split(master_key, num=8)
 print(f"Keys shape: {keys.shape}")  # (8, 2)
 
+
 # %% [markdown]
 # 我们可以看到，`keys` 是一个形状为 (8, 2) 的数组，每一行都是一个独立的 PRNG Key，可以用来初始化不同的模型。而每个key本身是一个长度为2的数组，这是JAX PRNG Key的标准格式。
-
+#
 # **1. 为什么一个不够？（容量问题）**
 # *   JAX 经常需要在并行的设备上生成海量的随机数。
 # *   如果只用一个标准的 32 位整数（`uint32`），大约只有 40 亿（$2^{32}$）种可能的“种子”。
 # *   在大规模分布式训练或者需要极高安全性的随机模拟中，40 亿其实很容易发生“碰撞”（即两个不该相同的随机流撞车了）。
-
+#
 # **2. 为什么要两个？（64位扩展）**
 # *   JAX 实际上使用的是 **64 位** 的种子。
 # *   $2^{64}$ 是一个天文数字（约 1844 亿亿），这保证了你在整个宇宙的生命周期里一直 split 下去，也很难遇到重复的 key。
 # *   所以，这两个数合起来，其实代表了一个 **Huge Integer (64-bit)**。
-
+#
 # **3. 为什么不直接存成一个 64 位整数？（硬件兼容性）**
 # *   JAX 的底层算法（Threefry-2x32）和很多 AI 硬件（特别是早期的 TPU 和部分 GPU 核心）并没有原生的 64 位整数处理单元，或者处理 32 位比 64 位快得多。
 # *   于是，JAX 采取了一种工程上的折中：**把一个 64 位的大整数，“劈”成两个 32 位的整数存储**。
@@ -193,7 +194,7 @@ print(f"Keys shape: {keys.shape}")  # (8, 2)
 # ### 0. 基础设定：单体函数
 # 我们先写一个只负责初始化**一个**模型的函数。
 # 这是最符合人类直觉的写法，完全不需要考虑 Batch 维度。
-
+#
 
 # %%
 def init_single_layer(key, input_dim=10, output_dim=5):
@@ -232,7 +233,7 @@ print("目前结构: [{'w':.., 'b':..}, ..., {'w':.., 'b':..}] (Array of Structu
 # %% [markdown]
 # 2. 手动堆叠 (为了变成 GPU 喜欢的 Tensor 格式)
 # 这一步通常很痛苦，需要再次遍历字典结构
-# 这里我们借用 tree_map 模拟一下手动堆叠的过程
+# 这里我们借用 tree_map 模拟一下手动堆叠的过程[[day01-jax与纯函数#B.  (结构映射)|tree map]]
 
 # %%
 stacked_params_manual = jax.tree_util.tree_map(
@@ -289,5 +290,3 @@ structure = jax.tree_util.tree_map(print_shape, batched_params_vmap)
 print(f"   Dict {{ 'w': BatchArray{structure['w']}, 'b': BatchArray{structure['b']} }}")
 print("   Vmap 自动帮我们把 Batch 维度放在了最前面 (Leading Dimension)。")
 print("   这意味着所有模型的 'w' 都在一块连续的内存里，可以一个指令并行计算所有模型！")
-
-# %%
