@@ -18,16 +18,14 @@
 # `vmap` 的精髓在于 `in_axes`。你必须极其清楚哪个参数需要切分（Batch），哪个参数需要广播（Weights）。
 
 # %%
-import os
-
-# 【必须在 import jax 前设置】模拟 8 个设备
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
-
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+
+jax.config.update("jax_platform_name", "cpu")
+jax.config.update("jax_num_cpu_devices", 8)
 
 
 # 1. 定义核心逻辑 (只写处理单个样本的数学公式)
@@ -58,7 +56,7 @@ print(f"Vmap   Output Shape: {res.shape}")  # (32, 10)
 # %% [markdown]
 # #### **2. Jaxpr 里的秘密**
 #
-# 怎么证明 JAX 不是在跑循环？看 Jaxpr。
+# 怎么证明 JAX 不是在跑循环？看 Jaxpr。[[day02-追踪与编译]]
 
 # %%
 print("\n>>> Vmap 后的 Jaxpr (注意 dot_general):")
@@ -83,8 +81,7 @@ print(jax.make_jaxpr(batched_predict)(W, b, batch_x))
 # 为了演示，我们需要“欺骗”XLA，让它以为我们有 8 张 TPU/GPU。
 
 # %%
-
-
+# 在上方import jax之前已经声明了八个设备
 # 创建物理网格：2行4列
 # axis_names 是我们给物理轴起的逻辑名字
 # 'data': 用于数据并行
@@ -98,7 +95,7 @@ print(f"设备网格:\n{mesh}")
 # %% [markdown]
 # #### **2. PartitionSpec 的策略艺术**
 #
-# 这里我们要结合你报告中的 **算术强度 (Arithmetic Intensity)** 理论。
+# 结合 **算术强度 (Arithmetic Intensity)** 理论。
 #
 # * **Data Parallel (DP)**: 算力/通信比高。Batch 维切分，参数复制。
 # * **Tensor Parallel (TP)**: 算力/通信比低（需高频通信）。参数切分。
@@ -161,13 +158,16 @@ print(f"Result Sharding: {result.sharding}")
 #
 # ### Part 3: 显微镜下的 HLO (验证通信)
 #
-# *话术：“不要轻信魔法。我们要像法医一样解剖代码，看看编译器到底有没有帮我们做 All-Reduce。”*
+# *不要轻信魔法。我们要像法医一样解剖代码，看看编译器到底有没有帮我们做 All-Reduce。*[[day02-追踪与编译]]
 
 # %%
 # Lowering 到 HLO (High Level Optimizer) 代码
 lowered = sharded_matmul.lower(X, W)
 compiled = lowered.compile()
 hlo_text = compiled.as_text()
+
+print("\n>>> HLO 代码展示:")
+print("\n", hlo_text)  # 打印前
 
 print("\n--- HLO 通信指令侦测 ---")
 # 在 HLO 中寻找 collective ops
@@ -180,7 +180,7 @@ if found_ops:
     print("解释：由于我们在 'model' 轴切分了收缩维 (Seq)，")
     print("XLA 必须在计算后执行 All-Reduce 以聚合局部结果。")
 else:
-    print("❌ 未发现通信指令。请检查 PartitionSpec 是否导致了退化。")
+    print("❌ 未发现通信指令。")
 
 
 # %% [markdown]
