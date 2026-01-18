@@ -63,6 +63,7 @@ import jax
 import jax.numpy as jnp
 
 
+# %%
 # 一个模拟的复杂变换 R^3 -> R^2
 def heavy_transform(x):
     # x: [3]

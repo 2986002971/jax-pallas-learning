@@ -21,7 +21,9 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+```
 
+```python
 # 一个典型的 PyTree：模型参数
 params = {
     "layer1": {"w": jnp.array([1.0, 2.0]), "b": jnp.array([0.0])},

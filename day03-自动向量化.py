@@ -28,6 +28,7 @@ jax.config.update("jax_platform_name", "cpu")
 jax.config.update("jax_num_cpu_devices", 8)
 
 
+# %%
 # 1. 定义核心逻辑 (只写处理单个样本的数学公式)
 # 这是一个简单的线性层: y = w @ x + b
 def predict_single(w, b, x):

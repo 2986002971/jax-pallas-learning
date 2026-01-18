@@ -40,6 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 
 
+# %%
 # 定义一个容易被融合的函数
 # 逻辑：三个独立的操作（sin -> 乘法 -> 加法）
 def my_func(x):
@@ -112,6 +113,7 @@ print(compiled.as_text())
 #
 #
 
+
 # %%
 @jax.jit
 def mysterious_func(x):
@@ -174,6 +176,7 @@ res2 = mysterious_func(jnp.array(10.0))
 #
 # **(1) 错误示范：来者不拒**
 #
+
 
 # %%
 @jax.jit
@@ -269,6 +272,7 @@ print(f"闭包循环耗时: {time.time() - start:.4f}s")
 # 当我们试图用一个 Traced Array 去驱动 Python 的控制流（if, for, range）时，就会报错。
 #
 
+
 # %%
 @jax.jit
 def semantic_error_function(x, list_length):
@@ -295,6 +299,7 @@ except Exception as e:
 #
 # **代价**：这个数值一旦变化，JAX 就必须重编译。
 #
+
 
 # %%
 # static_argnums=(1,) 表示第 1 个参数 (loop_count) 是静态的
@@ -341,12 +346,12 @@ res3 = static_loop_function(x, 10)
 #         """
 #         当你写 range(x) 或 list[x] 时，Python 会调用此方法。
 #         """
-#         if is_concrete(self): 
+#         if is_concrete(self):
 #             # 如果是常量（比如 static_argnums 指定的），那就没问题
 #             return operator.index(self.to_concrete_value())
-#         
+#
 #         # 关键点！如果是 Tracer，立马报错拦截！
-#         check_integer_conversion(self) 
+#         check_integer_conversion(self)
 #         # 这里最终会抛出 TracerIntegerConversionError
 #         return self.aval._index(self)
 #
@@ -354,14 +359,14 @@ res3 = static_loop_function(x, 10)
 #         """
 #         当你写 if x: 或 while x: 时，Python 会调用此方法。
 #         """
-#         if is_concrete(self): 
+#         if is_concrete(self):
 #             return bool(self.to_concrete_value())
-#             
+#
 #         # 拦截！不允许 Tracer 变成 True/False
 #         check_bool_conversion(self)
 #         # 这里最终会抛出 TracerBoolConversionError
 #         return self.aval._bool(self)
-#     
+#
 #     # ... 甚至连转成普通数组也不行 ...
 #     def tolist(self):
 #         raise ConcretizationTypeError(self, "The tolist() method was called...")
