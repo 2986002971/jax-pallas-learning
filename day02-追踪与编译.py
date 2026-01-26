@@ -1,7 +1,7 @@
 # %% [markdown]
 # ### Part 1: XLA 与 HLO (编译器的中间语言)
 #
-# 你问 HLO 是什么？简单来说，它是 Python 代码和 GPU 机器码之间的“通用语”。
+# 你问 HLO 是什么？简单来说，它是 Python 代码和 GPU 机器码之间的“通用语”，High Level Operations。
 #
 # 理解 JAX 的核心，在于理解它的编译流水线。优化和提速并不是发生在 Python 写完的那一刻，而是在 XLA 编译器接手之后。
 #
@@ -112,7 +112,7 @@ print(compiled.as_text())
 #
 #
 #
-
+#
 
 # %%
 @jax.jit
@@ -176,7 +176,7 @@ res2 = mysterious_func(jnp.array(10.0))
 #
 # **(1) 错误示范：来者不拒**
 #
-
+#
 
 # %%
 @jax.jit
@@ -271,7 +271,7 @@ print(f"闭包循环耗时: {time.time() - start:.4f}s")
 # **(1) 报错现场**
 # 当我们试图用一个 Traced Array 去驱动 Python 的控制流（if, for, range）时，就会报错。
 #
-
+#
 
 # %%
 @jax.jit
@@ -299,7 +299,7 @@ except Exception as e:
 #
 # **代价**：这个数值一旦变化，JAX 就必须重编译。
 #
-
+#
 
 # %%
 # static_argnums=(1,) 表示第 1 个参数 (loop_count) 是静态的

@@ -1,6 +1,6 @@
 ### Part 1: XLA 与 HLO (编译器的中间语言)
 
-你问 HLO 是什么？简单来说，它是 Python 代码和 GPU 机器码之间的“通用语”。
+你问 HLO 是什么？简单来说，它是 Python 代码和 GPU 机器码之间的“通用语”，High Level Operations。
 
 理解 JAX 的核心，在于理解它的编译流水线。优化和提速并不是发生在 Python 写完的那一刻，而是在 XLA 编译器接手之后。
 
