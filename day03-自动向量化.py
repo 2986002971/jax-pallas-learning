@@ -142,6 +142,41 @@ print(jax.make_jaxpr(batched_predict)(W, b, batch_x))
 #
 # 接下来，我们在 Part 2 中，就将利用这个 `X @ W + b` 的范式，来通过代码手写一个真正的全连接层。
 #
+# #### 🍻 彩蛋：不想背维度规则？召唤“爱因斯坦求和约定”
+# <details>
+# 如果你觉得上面的“最后一维”、“倒数第二维”、“广播规则”听起来让人头大，NumPy 和 JAX 提供了一个**上帝视角**的工具，让你直接跳过这些隐式规则，用最接近数学公式的方式写代码。
+#
+# 这就是 **`jnp.einsum` (Einstein Summation Convention)**。
+#
+# 还记得我们说 Python 里的矩阵乘法是 $Y = X @ W$ 吗？
+# *   $X$ 的形状是 `(batch, in_dim)`
+# *   $W$ 的形状是 `(in_dim, out_dim)`
+# *   $Y$ 的形状是 `(batch, out_dim)`
+#
+# 用 `einsum`，你甚至不需要思考谁在左谁在右，只需要把**索引的名字**告诉它：
+#
+# ```code
+# # 'bi' 代表 X 的维度 (batch, in_dim)
+# # 'io' 代表 W 的维度 (in_dim, out_dim)
+# # '->' 代表输出
+# # 'bo' 代表输出 Y 的维度 (batch, out_dim)
+#
+# Y = jnp.einsum('bi, io -> bo', X, W)
+# ```
+#
+# **这一行代码发生了什么？**
+# 它在告诉 JAX：“找到所有相同的索引（这里是 `i`），把它对应的维数乘起来并求和（Sum reduction），剩下的索引（`b` 和 `o`）保留下来作为输出的维度。”
+#
+# **为什么说它是“神器”？**
+# 1.  **显式优于隐式**：你再也不用担心自动广播会悄悄搞错维度。你想让哪两维相乘，就给它们写一样的字母。
+# 2.  **无视形状顺序**：
+#     *   如果此时 $W$ 是转置过的 `(out_dim, in_dim)` 怎么办？
+#     *   普通写法：`X @ W.T` (还得想一下要不要转置)
+#     *   Einsum 写法：`jnp.einsum('bi, oi -> bo', X, W)` (直接把索引对应上，JAX 自己会去管内存怎么读)
+# 3.  **JAX 的最爱**：在 JAX 的底层编译器（XLA）眼中，`einsum` 通常能被优化成极高效率的计算图，有时候比你手写的 `transpose` + `matmul` 还要快。
+#
+# 所以，如果你在未来更复杂的 Attention 机制实现中迷失在维度的海洋里，记得回来试试这把“手术刀”。
+# </details>
 # ---
 #
 # ### Part 2: Sharding —— 拥抱 Shardy 新范式 (Macro-Parallelism)
