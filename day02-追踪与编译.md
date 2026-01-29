@@ -91,7 +91,7 @@ print(compiled.as_text())
 
 *   **没有 XLA (阶段 2 的样子)**:
     计算流是：`读内存 x` $\rightarrow$ `算 sin` $\rightarrow$ `写回内存 y` $\rightarrow$ `读内存 y` $\rightarrow$ `算乘法`...
-    这叫 **Memory Bound (受限于显存带宽)**，GPU 核心算得快，但在这等着数据搬运。
+    这叫 **Memory Bound (受限于显存带宽)**，GPU 核心算得快，但在这等着数据搬运。[[day06-计算的物理形态]]
 
 *   **有 XLA (阶段 3 的样子)**:
     编译器发现这三个操作是一条线的，它会生成一个超级 **Kernel (核函数)**。

@@ -90,7 +90,7 @@ print(compiled.as_text())
 #
 # *   **没有 XLA (阶段 2 的样子)**:
 #     计算流是：`读内存 x` $\rightarrow$ `算 sin` $\rightarrow$ `写回内存 y` $\rightarrow$ `读内存 y` $\rightarrow$ `算乘法`...
-#     这叫 **Memory Bound (受限于显存带宽)**，GPU 核心算得快，但在这等着数据搬运。
+#     这叫 **Memory Bound (受限于显存带宽)**，GPU 核心算得快，但在这等着数据搬运。[[day06-计算的物理形态]]
 #
 # *   **有 XLA (阶段 3 的样子)**:
 #     编译器发现这三个操作是一条线的，它会生成一个超级 **Kernel (核函数)**。
@@ -114,7 +114,7 @@ print(compiled.as_text())
 #
 #
 #
-
+#
 
 # %%
 @jax.jit
@@ -179,7 +179,7 @@ res2 = mysterious_func(jnp.array(10.0))
 # **(1) 错误示范：来者不拒**
 #
 #
-
+#
 
 # %%
 @jax.jit
@@ -275,7 +275,7 @@ print(f"闭包循环耗时: {time.time() - start:.4f}s")
 # 当我们试图用一个 Traced Array 去驱动 Python 的控制流（if, for, range）时，就会报错。
 #
 #
-
+#
 
 # %%
 @jax.jit
@@ -304,7 +304,7 @@ except Exception as e:
 # **代价**：这个数值一旦变化，JAX 就必须重编译。
 #
 #
-
+#
 
 # %%
 # static_argnums=(1,) 表示第 1 个参数 (loop_count) 是静态的
