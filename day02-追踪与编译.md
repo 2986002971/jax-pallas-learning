@@ -1,6 +1,6 @@
 ### Part 1: XLA 与 HLO (编译器的中间语言)
 
-你问 HLO 是什么？简单来说，它是 Python 代码和 GPU 机器码之间的“通用语”，High Level Operations。
+你问 HLO 是什么？简单来说，它是 Python 代码和 GPU 机器码之间的“通用语”，High Level Optimizer。
 
 理解 JAX 的核心，在于理解它的编译流水线。优化和提速并不是发生在 Python 写完的那一刻，而是在 XLA 编译器接手之后。
 
@@ -13,12 +13,12 @@
     *   *JAX 做的：* 运行 Python 代码，记录操作。
 2.  **Jaxpr (JAX Expression)**:
     *   *JAX 做的：* 生成一个纯数学的表达层，去除 Python 语法糖。此时**没有**任何优化。
-3.  **$\downarrow$ Lowering (降级) $\leftarrow$ 这里的产物是“未优化的 HLO”**
-    *   *JAX 做的：* 机械地将 Jaxpr 翻译成 XLA 能懂的 HLO 指令 (通常叫 MHLO (MLIR HLO))。
-    *   *特征：* 此时还是“一步一动”，这也叫 HLO module，但还没经过打磨。
+3.  **$\downarrow$ Lowering (降级) $\leftarrow$ 这里的产物是“StableHLO”**
+    *   *JAX 做的：* 将 Jaxpr 翻译成 **StableHLO** (Stable High-Level Optimizer)，这是一种基于 MLIR 的标准化中间表示，具有版本兼容性。
+    *   *特征：* 此时还是“一步一动”，操作是独立的（如 `stablehlo.sine`, `stablehlo.multiply`），尚未经过 XLA 的融合优化。
 4.  **$\downarrow$ XLA Compilation (编译与优化) $\leftarrow$ 【关键！融合发生在这里】**
-    *   *XLA 做的：* 激进的优化！**算子融合 (Fusion)、内存规划、死代码消除**都在这一步。
-    *   *产物：* “优化后的 HLO”。
+    *   *XLA 做的：* 首先将 StableHLO 转换为 XLA 内部的 HLO IR，然后执行激进的优化！**算子融合 (Fusion)、内存规划、死代码消除**都在这一步。
+    *   *产物：* “优化后的 HLO”（最终生成机器码）。
 5.  **Binary (机器码)**:
     *   生成最终跑在 GPU/TPU 上的二进制指令。
 
@@ -62,20 +62,21 @@ print(jax.make_jaxpr(my_func)(x_sample))
 ```
 ```python
 # ==========================================
-# 阶段 2: Lowered HLO (优化前 / 直译)
+# 阶段 2: Lowered StableHLO (优化前 / 直译)
 # ==========================================
-# .lower() 只是翻译，不涉及 XLA 的核心优化
+# .lower() 只是翻译成 StableHLO，不涉及 XLA 的核心优化
 lowered = jit_func.lower(x_sample)
-print("\n>>> [2] Lowered HLO (优化前 - 注意看这是散装的指令):")
+print("\n>>> [2] Lowered StableHLO (优化前 - 注意看这是散装的指令):")
 print(lowered.as_text())
-# 观察点：你会看到 mhlo.sine, mhlo.multiply, mhlo.add 都是独立的行。
+# 观察点：你会看到 stablehlo.sine, stablehlo.multiply, stablehlo.add 都是独立的行。
 # 这意味着如果直接跑，显存要读写多次。
+# 注：在某些 JAX 版本中，你可能看到 mhlo 前缀，这是旧称（MLIR HLO），现正逐步统一为 StableHLO。
 ```
 ```python
 # ==========================================
 # 阶段 3: Compiled HLO (优化后 / 融合)
 # ==========================================
-# .compile() 启动 XLA 编译器，进行融合
+# .compile() 启动 XLA 编译器，先将 StableHLO 转为内部 HLO，再进行融合优化
 compiled = lowered.compile()
 print("\n>>> [3] Compiled HLO (优化后 - 见证奇迹的时刻):")
 print(compiled.as_text())
@@ -110,6 +111,7 @@ print(compiled.as_text())
 3.  记录下来的这张图，就是计算图，然后再送去编译。
 
 **证据：Python 的 `print` 只会执行一次！**
+
 
 
 
@@ -176,6 +178,7 @@ JAX 的快来源于编译，而慢来源于**重编译**。理解 JAX 缓存的 
 如果你的数据全是变长的，你的显存很快就会被成千上万个“微调版”的程序填满，导致 OOM (Out Of Memory)。
 
 **(1) 错误示范：来者不拒**
+
 
 
 
@@ -274,6 +277,7 @@ print(f"闭包循环耗时: {time.time() - start:.4f}s")
 
 
 
+
 ```python
 @jax.jit
 def semantic_error_function(x, list_length):
@@ -299,6 +303,7 @@ except Exception as e:
 使用 `static_argnums` 将参数标记为静态。这意味着：**JAX 会读取它的具体数值，把它当做常量编译进代码里。**
 
 **代价**：这个数值一旦变化，JAX 就必须重编译。
+
 
 
 
