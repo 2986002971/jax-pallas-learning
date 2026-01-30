@@ -180,7 +180,7 @@ try:
 except Exception as e:
     print("Expected Error during grad:", e)
 ```
-因为 Pallas Kernel 内部包含了副作用（原地写入 `z_ref`），JAX 的自动微分引擎无法追踪。[[day02-追踪与编译]]
+因为 Pallas Kernel 内部包含了副作用（原地写入 `z_ref`）[[day01-jax与纯函数]] ，JAX 的自动微分引擎无法追踪。[[day02-追踪与编译]]
 
 我们必须手写反向传播逻辑。
 
