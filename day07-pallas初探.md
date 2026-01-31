@@ -121,9 +121,9 @@ def add_kernel(x_ref, y_ref, z_ref):
 ```
 
 ---
-## Part 3: 定义调度策略 (The Logistics)
+## Part 3: 定义调度策略 (The Logistics) —— 解读 BlockSpec 的密码
 
-接下来，我们需要定义如何把一个大矩阵切分给上面的小内核。
+接下来，我们需要定义如何把一个大矩阵切分给上面的小内核。这是 Pallas 中最精妙也最容易产生误解的部分。
 
 假设我们有一个 `(1024, 1024)` 的大矩阵，我们想用 `(128, 128)` 的块去处理它。
 
@@ -132,10 +132,125 @@ def add_kernel(x_ref, y_ref, z_ref):
 BLOCK_SHAPE = (128, 128)
 
 # 创建 BlockSpec
-# 输入输出的切分逻辑是一样的，所以我们共用这个 Spec
+# 注意：这里的 lambda i, j: (i, j) 看起来像是"返回坐标本身"，但其实有深层语义
 common_spec = pl.BlockSpec(index_map=lambda i, j: (i, j), block_shape=BLOCK_SHAPE)
 ```
 
+### 3.1 关键认知：index_map 返回的是"第几个块"，而非"从哪里开始"
+
+很多有经验的 CUDA/Triton 程序员看到 `lambda i, j: (i, j)` 会感到困惑：
+> "为什么不写 `lambda i, j: (i*128, j*128)`？直接返回内存偏移量不是更直观吗？"
+
+**这正是 Pallas 设计的高明之处**——它引入了一层**逻辑抽象**：
+
+- `grid=(8, 8)` 定义了逻辑执行网格（8×8=64 个 kernel 实例同时运行）
+- `index_map` 接收的参数 `(i, j)` 是当前 kernel 在**逻辑网格中的坐标**（即"我是第 i 行第 j 列的块"）
+- **`index_map` 的返回值会被自动乘以 `block_shape` 的对应维度**，得到实际的内存起始地址
+
+**执行流程拆解**：
+```pseudocode
+# 你写的逻辑：
+index_map=lambda i, j: (i, j)
+block_shape=(128, 128)
+
+# Pallas 内部实际计算的内存起始位置：
+# 对于 grid 位置 (i=1, j=2) 的 kernel 实例：
+memory_offset_i = 1 * 128 = 128  # 第 1 个块 → 从元素 128 开始
+memory_offset_j = 2 * 128 = 256  # 第 2 个块 → 从元素 256 开始
+
+# Kernel 看到的 x_ref[...] 对应的就是原数组 [128:256, 256:384] 这片区域
+```
+
+这层抽象让我们可以用**逻辑索引**思考并行调度，而非**物理地址**。
+
+### 3.2 BlockSpec 的类型系统与协作机制
+
+`block_shape` 不只是一串整数，它是一个**类型标记**，决定了 `index_map` 的返回值如何被解释：
+
+```pallas_code
+def compute_start_indices_interpret(self, block_indices, block_shape):
+    def _get_start_index(i, b):  # i 来自 index_map，b 来自 block_shape
+      match b:
+        case Squeezed() | Element():
+          return i  # 压缩维度：索引即偏移（通常为 0）
+        case Blocked(block_size):
+          return block_size * i  # 标准块：自动乘法！
+        case BoundedSlice():
+          # i 必须是 pl.Slice 对象，直接包含 (start, size)
+          return i.start
+    return tuple(_get_start_index(i, b) for i, b in zip(block_indices, block_shape))
+```
+
+**核心规则**：
+1. **对于 `int` 或 `Blocked()` 维度**：`index_map` 返回标量 `i` → 实际起始地址 = `i × block_size`
+2. **对于 `None` 或 `Squeezed()` 维度**：`index_map` 返回 `i` → 直接使用（通常用于广播或压缩维度）
+3. **返回值长度必须严格匹配**：`len(index_map(...)) == len(block_shape)`
+
+### 3.3 实战：不同 index_map 模式的威力
+
+利用这种逻辑索引抽象，我们可以轻松实现复杂的内存访问模式，而无需手动计算字节偏移：
+
+```python
+# 模式 1：标准分块（行优先扫描）
+# 效果：kernel (i,j) 处理原数组的 [i*128:(i+1)*128, j*128:(j+1)*128]
+standard_spec = pl.BlockSpec(
+    index_map=lambda i, j: (i, j),
+    block_shape=(128, 128)
+)
+
+# 模式 2：转置分块（行列交换）
+# 效果：kernel (i,j) 处理原数组的 [j*128:(j+1)*128, i*128:(i+1)*128]
+# 用途：矩阵转置的高效实现
+transpose_spec = pl.BlockSpec(
+    index_map=lambda i, j: (j, i),  # 只需交换 i,j！
+    block_shape=(128, 128)
+)
+
+# 模式 3：反向扫描（从右下角开始）
+# 效果：先处理数组的右下角，再向左上角推进
+reverse_spec = pl.BlockSpec(
+    index_map=lambda i, j, ni, nj: (ni - 1 - i, nj - 1 - j),  # ni, nj 是 grid 总维度
+    block_shape=(128, 128)
+)
+
+# 模式 4：跳跃式分块（步长 2，处理奇数/偶数块）
+# 效果：kernel i 处理第 2i 个块，跳过中间块
+# 用途：卷积中的 dilation，或特殊的并行策略
+strided_spec = pl.BlockSpec(
+    index_map=lambda i, j: (2*i, j),  # 逻辑索引 0→0, 1→2, 2→4...
+    block_shape=(128, 128)
+)
+# 实际内存地址：0, 256, 512...（自动乘以 128）
+```
+
+### 3.4 厨房隐喻的再诠释
+
+让我们回到之前的厨房模型，现在你能更准确地理解 `BlockSpec` 的角色：
+
+- **`grid` = 流水线规划**：决定派多少厨师（kernel 实例）同时工作，以及如何编排（几行几列）。
+- **`index_map` = 取货单逻辑**：每个厨师先看自己在流水线中的编号 `(i, j)`，然后根据规则算出"我应该去冷库取第几号货箱"。
+  - 厨师报告的"第 i 号"是**逻辑编号**
+  - 冷库管理员（Pallas 运行时）知道每个货箱大小（`block_shape`），自动算出实际货架位置：`货箱大小 × 逻辑编号`
+- **`block_shape` = 标准化货箱**：规定每个厨师一次只能搬走固定大小的食材（128×128）。
+
+**为什么这样设计？**
+想象如果厨师自己算物理地址 `i*128`，一旦你想改变货箱大小（比如从 128 改成 64），所有 `index_map` 都要重写。而现在，你只需要改 `block_shape`，`index_map` 的逻辑 `(i, j)` 完全不变——**实现了调度逻辑与内存布局的解耦**。
+
+### 3.5 完整配置代码
+
+现在你应该能理解这段代码的每一层含义：
+
+```python
+# 定义分块大小：每个 kernel 处理 128x128 的元素块
+BLOCK_SHAPE = (128, 128)
+
+# index_map 返回逻辑块坐标 (i, j)
+# Pallas 自动映射为内存偏移 (i*128, j*128)
+common_spec = pl.BlockSpec(
+    index_map=lambda i, j: (i, j), 
+    block_shape=BLOCK_SHAPE
+)
+```
 
 ---
 ## Part 4: 封装前向调用

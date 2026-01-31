@@ -55,9 +55,6 @@ x_input = jax.random.normal(key, (H, W), dtype=jnp.float32)
 
 # %% [markdown]
 # ### 2.2 定义 Kernel
-#
-# 注意观察 `BlockSpec` 的形状差异。
-#
 
 # %%
 # ==========================================
@@ -102,6 +99,7 @@ def col_reduce_kernel(x_ref, o_ref):
 #
 # ### 3.3 封装调用函数
 #
+# 注意观察 `BlockSpec` 的形状差异。[[day07-pallas初探]]
 
 # %%
 @jax.jit

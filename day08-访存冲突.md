@@ -55,9 +55,6 @@ x_input = jax.random.normal(key, (H, W), dtype=jnp.float32)
 
 ### 2.2 定义 Kernel
 
-注意观察 `BlockSpec` 的形状差异。
-
-
 ```python
 # ==========================================
 # Case A: 友好的行规约 (Friendly Row Reduce)
@@ -101,6 +98,7 @@ JAX 是**异步 (Asynchronous)** 的。当你调用函数时，Python 会立刻�
 
 ### 3.3 封装调用函数
 
+注意观察 `BlockSpec` 的形状差异。[[day07-pallas初探]]
 
 ```python
 @jax.jit
