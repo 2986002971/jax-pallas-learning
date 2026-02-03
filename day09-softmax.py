@@ -138,7 +138,6 @@ def online_softmax_kernel(x_ref, o_ref):
 
 # %%
 def run_online_softmax(x):
-    # x: (Batch, Total_Vocab)
     # 我们先在 Python 端把它 view 成 blocks
     # 假设 x 已经是 (Batch, N_Blocks, Block_Size)
     batch, n_blocks, block_size = x.shape

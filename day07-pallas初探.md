@@ -167,7 +167,7 @@ memory_offset_j = 2 * 128 = 256  # 第 2 个块 → 从元素 256 开始
 
 `block_shape` 不只是一串整数，它是一个**类型标记**，决定了 `index_map` 的返回值如何被解释：
 
-```pallas_code
+```pallas
 def compute_start_indices_interpret(self, block_indices, block_shape):
     def _get_start_index(i, b):  # i 来自 index_map，b 来自 block_shape
       match b:
