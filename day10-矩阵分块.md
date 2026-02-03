@@ -169,12 +169,21 @@ def run_pallas_matmul(a, b):
     M, K = a.shape
     K, N = b.shape
     BM, BN, BK = 128, 128, 32
+    # BK 的选择：
+    # 虽然 BK 只是循环的步长，理论上不影响总数据量。
+    # 但如果 BK 过大（如 128），会导致 Shared Memory OOM。
+    # 因此，BK 通常取 32 或 64 这种较小的值。
 
     # --- 1. Reshape for 4D View ---
     # A: (M_Grid, K_Grid, BM, BK)
     a_view = a.reshape(M // BM, BM, K // BK, BK).transpose(0, 2, 1, 3)
     # B: (K_Grid, N_Grid, BK, BN)
     b_view = b.reshape(K // BK, BK, N // BN, BN).transpose(0, 2, 1, 3)
+    # 这里我们在 Python 端做了 Reshape 和 Transpose。
+    # 优点：让 BlockSpec 的 index_map 写法变得极其简单（直接映射）。
+    # 缺点：XLA 可能会在 HBM 中显式创建这些 tensor 的副本，导致显存占用翻倍。
+    # 验证：如果你把 K 设得极大（如 50万），会报 HBM OOM，因为 XLA 试图把整个转置矩阵存下来。
+    # 真正的 Zero-Copy 优化需要更复杂的 index_map (直接算 stride)，这留给进阶读者探索。
 
     m_grid = a_view.shape[0]
     n_grid = b_view.shape[1]
