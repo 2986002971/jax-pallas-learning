@@ -49,6 +49,10 @@ $$ \text{AI}_{\text{tile}} = \frac{2 \cdot BM \cdot BN \cdot BK}{\text{sizeof} \
 
 $$ \text{AI}_{\text{tile}} \approx \frac{1}{\text{sizeof}} \times \frac{2 \cdot N_{block}^2 \cdot BK}{2 \cdot N_{block} \cdot BK} = \frac{N_{block}}{\text{sizeof}} $$
 
+例如，在以下矩阵乘法中，每个矩阵都是 9 块乘以 9 块，我们可以看到，如果我们按行主序计算输出，我们需要将 90 个块加载到 SRAM 中，以计算前 9 个输出块，但如果我们按分组顺序进行，我们只需要加载 54 个块。
+
+![对算术强度的直观理解](figs/grouped_vs_row_major_ordering.png)
+
 ### 1.3 深度解读 (The Insight)
 
 这是本章最重要的结论：
