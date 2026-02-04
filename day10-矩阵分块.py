@@ -109,8 +109,11 @@
 # 它的任务是：初始化 Accumulator，遍历 $K_{grid}$，不断搬运 $BK$ 大小的数据块并累加。
 
 # %%
+import time
+
 import jax
 import jax.experimental.pallas as pl
+import jax.experimental.pallas.triton as pltr
 import jax.numpy as jnp
 
 
@@ -158,7 +161,6 @@ def matmul_kernel(a_ref, b_ref, c_ref):
 #     *   我们锁死第 2 维 ($j$)，并把第 0 维 ($K_{grid}$) **整个**暴露给 Kernel。
 #     *   Kernel 看到的 Shape: `(K_Grid, BK, 1, BN)`
 #
-
 
 # %%
 @jax.jit
@@ -241,7 +243,7 @@ print(f"Max Diff: {jnp.max(jnp.abs(c_pallas - c_jax)):.6f}")
 # ## Part 5: 实验验证 —— Pallas 的内存行为大揭秘
 #
 # 在 Part 4 的代码中，我们留下了一个悬念：我们将 `BlockSpec` 定义为包含**整个 $K$ 维度**。
-# 这意味着，逻辑上不仅 $BM, BN$ 在 Block 里，连巨大的 $K$ 也在 Block 的定义里。
+# 这意味着，逻辑上不仅 $BM, BN$ 在 Block 里，连巨大的 $K$ 也在 Block 的定义里。[[day07-pallas初探]]
 #
 # **灵魂拷问**：
 # > 既然 Block 对应 SRAM，而 SRAM 只有几百 KB。为什么当我们把 $K$ 设为几万（几百 MB 数据）时，SRAM 没有被撑爆？
@@ -250,7 +252,6 @@ print(f"Max Diff: {jnp.max(jnp.abs(c_pallas - c_jax)):.6f}")
 #
 # ### 5.1 实验 A：挑战显存 (HBM) 极限
 # **测试逻辑**：保持 `BK=32` 不变（即每次循环只读 32 个数），疯狂增加总长度 $K$。
-
 
 # %%
 def stress_test_hbm_limit():
@@ -303,8 +304,9 @@ stress_test_hbm_limit()
 #
 # ### 5.2 实验 B：挑战片上内存 (SRAM) 极限
 # **测试逻辑**：保持总长度 $K$ 不变，疯狂增加 `BK`（单次循环读取的数据量）。
-# 理论上，如果 `Ref` 的数据是驻留在 SRAM 里的，那么稍微增加 `BK` 就会立即触碰物理天花板。
-
+# 理论上，如果 `Ref` 的数据是驻留在 SRAM 里的，那么稍微增加 `BK` 就会立即触碰物理天花板。[[day06-计算的物理形态]]
+#
+#
 
 # %%
 def stress_test_sram_limit():
@@ -369,6 +371,7 @@ def stress_test_sram_limit():
 
 stress_test_sram_limit()
 
+
 # %% [markdown]
 # **实验结果**：
 # 当 `BK` 增加到 64 时，立即触发了报错：
@@ -397,18 +400,228 @@ stress_test_sram_limit()
 # 这也解释了为什么我们在 Part 4 的代码是安全的，但也指出了优化的方向：既然 $K$ 是流式的，我们是否可以利用这个特性进行 **Pipeline（流水线）** 优化，掩盖读取 $BK$ 的时间？
 #
 # ---
+
+# %% [markdown]
+# ## Part 6: 时间维度的优化 —— 免费的午餐？
 #
-# ## Part 6: 总结与伏笔
+# 在 Part 5 的实验中，我们发现 Kernel 在处理 $K$ 维度时是**流式 (Streaming)** 的：它像吃回转寿司一样，一盘接一盘地把 $BK$ 大小的块搬进 SRAM。
 #
-# 今天我们通过**算术强度**的理论推导，证明了 $BM, BN$ 的大小是 MatMul 性能的关键。
+# 目前的吃法是：
+# 1.  等盘子转过来 (Load, $T_{mem}$)
+# 2.  吃掉 (Compute, $T_{math}$)
+# 3.  等下一盘 (Load, $T_{mem}$)
+# 4.  吃掉 (Compute, $T_{math}$)
 #
-# *   **Grid** 让我们利用了芯片上的所有核心。
-# *   **Block** 让我们最大化了每次读内存的计算产出。
-# *   **Loop** 让我们在 SRAM 有限的情况下处理了无限长的 $K$ 维度。
+# 总时间是 $\sum (T_{mem} + T_{math})$。这叫 **Stop-and-Wait**。
 #
-# **但是...**
-# 现在的代码还有一个严重的性能隐患：它是**串行**的。
-# `Load -> Compute -> Load -> Compute`。
-# 当计算单元在全速运转时，内存总线在睡觉；当数据在搬运时，计算单元在休息。
+# ### 6.1 软件流水线 (Software Pipelining)
 #
-# 在 **Day 11**，我们将引入 **Pipeline (流水线)** 技术，让 Load 和 Compute 同时进行，进一步榨干硬件性能。
+# 既然我们可以预知下一盘寿司是什么，为什么不**一边嘴里嚼着第 $i$ 盘，一边眼睛看着第 $i+1$ 盘**呢？
+#
+# 这就是 **软件流水线**。在 GPU 上，Pallas 降低到 Triton；在 TPU 上，Pallas 降低到 Mosaic。在 Pallas 的 Triton 后端中，我们甚至不需要重写代码，只需要给编译器一个“提示”，就能控制流水线的阶段数与内核使用的warp数量。[[day06-计算的物理形态]]
+#
+# *   **SRAM 双缓冲 (Double Buffering)**：编译器会在 SRAM 里开辟两块空间。
+# *   **指令重排**：编译器会自动把下一次循环的 `Load` 指令提前到当前循环的 `Dot` 计算之前。
+#
+# ### 6.2 注入灵魂：Compiler Params
+#
+# 我们只需要修改一行代码。在 `pl.pallas_call` 中加入 `compiler_params`：
+#
+
+# %%
+def run_pallas_matmul_pipelined(num_stages, num_warps=8):
+    BM, BN, BK = 128, 128, 32
+    params = pltr.CompilerParams(
+        num_stages=num_stages, num_warps=num_warps
+    )  # <--- 注入灵魂，triton后端可以指定编译参数来控制流水线的阶段数与内核使用的warp数量
+
+    @jax.jit
+    def run_matmul(a, b):
+        M, K = a.shape
+        _, N = b.shape
+
+        # Reshape & Transpose (标准 Day 10 写法)
+        a_view = a.reshape(M // BM, BM, K // BK, BK)
+        b_view = b.reshape(K // BK, BK, N // BN, BN)
+
+        return pl.pallas_call(
+            matmul_kernel,
+            out_shape=jax.ShapeDtypeStruct((M // BM, BM, N // BN, BN), a.dtype),
+            in_specs=[
+                pl.BlockSpec(
+                    (1, BM, K // BK, BK),
+                    lambda i, _: (i, 0, 0, 0),
+                ),
+                pl.BlockSpec(
+                    (K // BK, BK, 1, BN),
+                    lambda _, j: (0, 0, j, 0),
+                ),
+            ],
+            out_specs=pl.BlockSpec((1, BM, 1, BN), lambda i, j: (i, 0, j, 0)),
+            grid=(M // BM, N // BN),
+            compiler_params=params,  # <--- 注入灵魂
+        )(a_view, b_view).reshape(M, N)
+
+    return run_matmul
+
+
+# %% [markdown]
+# **原理**：
+# `num_stages=3` 意味着编译器会分配 3 份 SRAM Buffer。
+# *   Stage 1: 正在计算 (Compute)
+# *   Stage 2: 数据刚到，准备计算
+# *   Stage 3: 正在从 HBM 拼命搬运 (Prefetching)
+#
+# 只要计算时间 $T_{math}$ 大于搬运时间 $T_{mem}$，搬运的延迟就被完全**隐藏 (Hidden)** 了。
+#
+# ---
+#
+# ## Part 7: 终极竞技场 —— 性能实测
+#
+# 理论说得再好听，跑分才是硬道理。我们将对比三种实现：
+# 1.  **JAX Native**: 也就是 NVIDIA 闭源的 `cuBLAS`，业界的性能天花板。
+# 2.  **Pallas (Stage=1)**: 我们之前的朴素分块代码。
+# 3.  **Pallas (Stage=3)**: 开启自动流水线的代码。
+#
+
+# %%
+def benchmark_suite():
+    # 准备选手
+    kernels = {
+        "JAX Native": jnp.matmul,
+        "Pallas(S=1, W=4)": run_pallas_matmul_pipelined(num_stages=1),
+        "Pallas(S=2, W=8)": run_pallas_matmul_pipelined(num_stages=2),
+        "Pallas(S=3, W=8)": run_pallas_matmul_pipelined(num_stages=3),
+        # 激进一点，试试 Stage=4
+        "Pallas(S=4, W=8)": run_pallas_matmul_pipelined(num_stages=4),
+    }
+
+    # 准备考题：从小到大
+    sizes = [
+        (2048, 2048, 2048),
+        (4096, 4096, 4096),
+        (8192, 8192, 8192),
+    ]
+
+    results = []
+
+    for M, N, K in sizes:
+        print(f"\n=== Benchmarking Size: {M}x{N}x{K} ===")
+        key = jax.random.PRNGKey(0)
+        a = jax.random.normal(key, (M, K), dtype=jnp.float16)
+        b = jax.random.normal(key, (K, N), dtype=jnp.float16)
+
+        for name, kernel_fn in kernels.items():
+            try:
+                _ = kernel_fn(a, b).block_until_ready()
+
+                start = time.time()
+                n_iters = 10 if M < 8000 else 5
+                for _ in range(n_iters):
+                    _ = kernel_fn(a, b).block_until_ready()
+                end = time.time()
+
+                avg_time_ms = (end - start) / n_iters * 1000
+                tflops = (2 * M * N * K) / (avg_time_ms / 1000) / 1e12
+
+                results.append(
+                    {
+                        "Size": f"{M}",
+                        "Kernel": name,
+                        "Time(ms)": avg_time_ms,
+                        "TFLOPS": tflops,
+                    }
+                )
+                print(f"[{name:<16}] {avg_time_ms:>7.2f} ms | {tflops:>6.2f} TFLOPS")
+
+            except Exception as e:
+                print(f"[{name:<16}] Failed: {e}")
+
+    return results
+
+
+# 执行测试
+results = benchmark_suite()
+
+print("\n=== Final Summary (TFLOPS) ===")
+
+if results:
+    # 收集唯一的 Size 和 Kernel（保持顺序）
+    unique_sizes = []
+    unique_kernels = []
+    for r in results:
+        if r["Size"] not in unique_sizes:
+            unique_sizes.append(r["Size"])
+        if r["Kernel"] not in unique_kernels:
+            unique_kernels.append(r["Kernel"])
+
+    # 构建 {(size, kernel): value} 映射
+    pivot_data = {(r["Size"], r["Kernel"]): r["TFLOPS"] for r in results}
+
+    # 计算列宽
+    size_col_width = max(len(str(s)) for s in unique_sizes) + 2
+    kernel_col_widths = [max(len(k), 8) + 2 for k in unique_kernels]
+
+    # 打印表头
+    header = "Size".ljust(size_col_width)
+    for i, k in enumerate(unique_kernels):
+        header += k.center(kernel_col_widths[i])
+    print(header)
+    print("-" * (sum(kernel_col_widths) + size_col_width))
+
+    # 打印数据行
+    for size in unique_sizes:
+        row = str(size).ljust(size_col_width)
+        for i, kernel in enumerate(unique_kernels):
+            val = pivot_data.get((size, kernel), None)
+            if val is not None:
+                cell = f"{val:.2f}".center(kernel_col_widths[i])
+            else:
+                cell = "N/A".center(kernel_col_widths[i])
+            row += cell
+        print(row)
+
+# %% [markdown]
+# ### 7.1 现象分析 (The Reality Check)
+#
+# 我们在消费级显卡（RTX 4060）上得到了一组非常有趣的数据：
+#
+# | Size | Kernel | TFLOPS (最佳) | 核心发现 |
+# | :--- | :--- | :--- | :--- |
+# | **2048** | JAX Native | 16.67 | cuBLAS 在小尺寸下因为 Overhead 没跑满。 |
+# | | Pallas (S=1) | 16.74 | 朴素写法竟然和 cuBLAS 持平。 |
+# | | Pallas (S=3) | **20.85** | **反杀！** 流水线让小矩阵性能提升了 ~25%。 |
+# | **4096** | JAX Native | 22.01 | 性能平稳，但似乎遇到了瓶颈。 |
+# | | Pallas (S=1) | 21.01 | 没有流水线，带宽成为瓶颈。 |
+# | | Pallas (S=3) | **33.86** | **高光时刻！超越 JAX Native 50%！** 这说明 Pallas 生成的 Kernel 完美命中了硬件甜点区。 |
+# | **8192** | JAX Native | **26.12** | cuBLAS 的大矩阵优化策略（如分块算法）开始发力。 |
+# | | Pallas (S=1) | 16.13 | 性能暴跌。单纯的 Tiling 已经无法处理这么大的数据量，Cache Thrashing 严重。 |
+# | | Pallas (S=3) | 16.92 | 流水线也救不回来了。这意味着我们需要更高级的优化（如 Swizzle 或 L2 Cache 优化）。 |
+#
+# **深度解读：数据的启示**
+#
+# 1.  **Stage 3 是“万金油”**：
+#     在所有尺寸下，`num_stages=3` 都比 `num_stages=2` 表现更好。这一方面是因为两级缓冲可能刚好覆盖不了 HBM 的延迟，另一方面说明 Triton 编译器在三级流水线下的指令调度更为激进和优秀。
+#
+# 2.  **中等尺寸的胜利 (The Sweet Spot)**：
+#     在 4096 这种中等尺寸下，我们的 Pallas Kernel 居然大幅超越了 NVIDIA 官方库。
+#     *   **原因**：cuBLAS 是闭源的通用库，它需要兼容各种奇怪的 Shape，可能有较大的 Launch Overhead 或为了通用性牺牲了部分激进优化。而我们的 Kernel 是**针对特定 Shape 专用于 Triton 编译的**，编译器可以直接把常数和循环展开写死在汇编里，做到了极致的特化。
+#
+# 3.  **大尺寸的滑铁卢**：
+#     在 8192 尺寸下，Pallas 性能大幅落后于 JAX Native。
+#     *   **原因**：当矩阵极大时，简单的 Grid 切分会导致对 L2 Cache 的利用率下降（Partition Camping 效应）。cuBLAS 内部使用了更复杂的 **Swizzle（光栅化路径）** 策略来访问内存，而我们只是简单的行/列扫描。要解决这个问题，我们需要在 Driver 端对 Grid 访问顺序做更加数学化的重排（这属于进阶话题）。
+#
+# ---
+#
+# ## Part 8: 总结
+#
+# 今天通过矩阵乘法，我们完成了一次从理论到实践的闭环：
+#
+# 1.  **算术强度 (AI)**：通过 **Block Tiling**，我们解决了**内存墙**。在 4096 大小下，即便没有流水线（S=1），我们也做到了和 cuBLAS 旗鼓相当。
+# 2.  **流水线 (Pipeline)**：通过 **num_stages=3**，我们成功隐藏了延迟。在最佳击球点（4096），我们甚至实现了对官方库的**大幅超越**。
+# 3.  **工程的边界**：我们也看到了单纯堆砌 `num_stages` 的局限性。在 8192 这种超大尺度下，简单的流水线无法解决所有问题，我们需要对内存访问模式有更深的理解。
+#
+# 这正是高性能计算的魅力：**没有一种优化是永远的“银弹”，只有针对特定场景的极致权衡。**
+#
+# 至此，你已经掌握了编写高性能 Kernel 的核心心法。现在，你的工具箱里已经有了 **Tiling（分块）** 和 **Pipeline（流水线）** 两件重型武器，足够去挑战 90% 的深度学习算子了！
+#
