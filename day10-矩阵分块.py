@@ -50,7 +50,7 @@
 #
 # $$ \text{AI}_{\text{tile}} \approx \frac{1}{\text{sizeof}} \times \frac{2 \cdot N_{block}^2 \cdot BK}{2 \cdot N_{block} \cdot BK} = \frac{N_{block}}{\text{sizeof}} $$
 #
-# 例如，在以下矩阵乘法中，每个矩阵都是 9 块乘以 9 块，我们可以看到，如果我们按行主序计算输出，我们需要将 90 个块加载到 SRAM 中，以计算前 9 个输出块，但如果我们按分组顺序进行，我们只需要加载 54 个块。
+# 例如，在以下矩阵乘法中，每个矩阵都是输出 9 个元素，我们可以看到，如果我们按朴素点积计算输出，我们需要将 90 个块加载到 SRAM 中以计算前 9 个输出块，但如果我们按分组顺序进行，我们只需要加载 54 个块。
 #
 # ![对算术强度的直观理解](figs/grouped_vs_row_major_ordering.png)
 #
@@ -91,14 +91,14 @@
 #
 # 为了让 BlockSpec 写得简单，我们延续之前的策略：**在 Python 端预处理**。[[day09-softmax]]
 #
-# 假设 $M=N=1024, K=2048$，Block $(128, 128, 128)$。
+# 假设 $M=N=1024, K=2048$, 且我们选择 $BM=BN=128, BK=32$。
 #
-# *   **Matrix A**: $(M, K) \rightarrow (8, 128, 16, 128)$
-#     *   为了配合 Grid，我们转置为：`(M_Grid, K_Grid, BM, BK)`
-# *   **Matrix B**: $(K, N) \rightarrow (16, 128, 8, 128)$
-#     *   为了配合 Grid，我们转置为：`(K_Grid, N_Grid, BK, BN)`
-# *   **Matrix C**: $(M, N) \rightarrow (M_Grid, N_Grid, BM, BN)$
-#
+# *   **Matrix A**: $(M, K) \rightarrow (M_{grid}, BM, K_{grid}, BK)$
+#     *   Shape: `(8, 128, 64, 32)`
+# *   **Matrix B**: $(K, N) \rightarrow (K_{grid}, BK, N_{grid}, BN)$
+#     *   Shape: `(64, 32, 8, 128)`
+# *   **Matrix C**: $(M, N) \rightarrow (M_{grid}, BM, N_{grid}, BN)$
+#     *   Shape: `(8, 128, 8, 128)`
 # ---
 #
 # ## Part 4: 代码实现
@@ -116,39 +116,29 @@ import jax.numpy as jnp
 
 def matmul_kernel(a_ref, b_ref, c_ref):
     """
-    a_ref: (1, K_Grid, BM, BK) - [Input View] A 的一整行 Block 序列
-    b_ref: (K_Grid, 1, BK, BN) - [Input View] B 的一整列 Block 序列
-    c_ref: (1, 1, BM, BN)         - [Output View] C 的一个 Tile
+    a_ref: (1, BM, K_Grid, BK)
+    b_ref: (K_Grid, BK, 1, BN)
+    c_ref: (1, BM, 1, BN)
     """
 
-    # 1. Accumulator Initialization
-    # 这一块内存驻留在 SRAM/Registers 中，读写极快
-    acc = jnp.zeros(c_ref.shape, dtype=jnp.float32)
+    acc = jnp.zeros(c_ref.shape, dtype=jnp.float32).squeeze((0, 2))  # (BM, BN)
 
-    # 获取 K 维度的步数
+    # 这里的 K_Grid 位于 b_ref 的第 0 维
     k_steps = b_ref.shape[0]
 
-    # 2. The Inner Loop (K-Dimension Reduction)
-    def body(i, current_acc):
-        # [Strict Load] 从 HBM 搬运一小块 (Tile) 到 SRAM
-        # Pallas 编译器会将其映射为 DMA Copy
-        a_tile = a_ref[0, i]  # Shape: (BM, BK)
-        b_tile = b_ref[i, 0]  # Shape: (BK, BN)
+    def body(k, current_acc):
+        # A: 取第 k 个 block。维度索引：(0, all_rows, k, all_cols)
+        a_tile = a_ref[0, :, k, :]
 
-        # [Compute] 矩阵乘法
-        # 这里对应 TPU 的 MXU 或 GPU 的 Tensor Core 指令
-        # 此时数据全在 SRAM，速度极快
+        # B: 取第 k 个 block。维度索引：(k, all_rows, 0, all_cols)
+        b_tile = b_ref[k, :, 0, :]
+
         return current_acc + jnp.dot(a_tile, b_tile)
 
-    # 执行循环，acc 在循环中不断累加
     acc = jax.lax.fori_loop(0, k_steps, body, acc)
 
-    # 3. [Fusion Opportunity]
-    # 如果有 Activation，可以在这里直接做，不消耗带宽
-    # acc = jax.nn.relu(acc)
-
-    # 4. [Strict Store] 最终结果写回 HBM
-    c_ref[:, :] = acc.astype(c_ref.dtype)
+    # Output: (1, BM, 1, BN) -> 需要写回 (BM, BN)
+    c_ref[0, :, 0, :] = acc.astype(c_ref.dtype)
 
 
 # %% [markdown]
@@ -157,71 +147,81 @@ def matmul_kernel(a_ref, b_ref, c_ref):
 # 这是最关键的映射逻辑。我们需要告诉 Pallas：对于 Grid $(i, j)$，去哪里找数据？[[day07-pallas初探]]
 #
 # *   **A 的逻辑**：Grid $(i, j)$ 需要 $A$ 的第 $i$ 行 block 序列。
-#     *   Input Shape: `(M_Grid, K_Grid, BM, BK)`
+#     *   Input View: `(M_Grid, BM, K_Grid, BK)`
 #     *   Index Map: `(i, j) -> (i, 0, 0, 0)`
-#     *   我们锁死第 0 维 ($i$)，并把第 1 维 ($K_{grid}$) **整个**暴露给 Kernel。
+#     *   我们锁死第 0 维 ($i$)，并把第 2 维 ($K_{grid}$) **整个**暴露给 Kernel。
+#     *   Kernel 看到的 Shape: `(1, BM, K_Grid, BK)`
 #
 # *   **B 的逻辑**：Grid $(i, j)$ 需要 $B$ 的第 $j$ 列 block 序列。
-#     *   Input Shape: `(K_Grid, N_Grid, BK, BN)`
-#     *   Index Map: `(i, j) -> (0, j, 0, 0)`
-#     *   我们锁死第 1 维 ($j$)，并把第 0 维 ($K_{grid}$) **整个**暴露给 Kernel。
+#     *   Input View: `(K_Grid, BK, N_Grid, BN)`
+#     *   Index Map: `(i, j) -> (0, 0, j, 0)`
+#     *   我们锁死第 2 维 ($j$)，并把第 0 维 ($K_{grid}$) **整个**暴露给 Kernel。
+#     *   Kernel 看到的 Shape: `(K_Grid, BK, 1, BN)`
 #
+
 
 # %%
 @jax.jit
 def run_pallas_matmul(a, b):
-    # a, b: 原始 (M, K), (K, N)
     M, K = a.shape
     K, N = b.shape
     BM, BN, BK = 128, 128, 32
     # BK 的选择：
-    # 虽然 BK 只是循环的步长，理论上不影响总数据量。
+    # 虽然 BK 只是循环的步长，理论上不影响算术强度。
     # 但如果 BK 过大（如 128），会导致 Shared Memory OOM。
     # 因此，BK 通常取 32 或 64 这种较小的值。
 
-    # --- 1. Reshape for 4D View ---
-    # A: (M_Grid, K_Grid, BM, BK)
-    a_view = a.reshape(M // BM, BM, K // BK, BK).transpose(0, 2, 1, 3)
-    # B: (K_Grid, N_Grid, BK, BN)
-    b_view = b.reshape(K // BK, BK, N // BN, BN).transpose(0, 2, 1, 3)
-    # 这里我们在 Python 端做了 Reshape 和 Transpose。
-    # 优点：让 BlockSpec 的 index_map 写法变得极其简单（直接映射）。
-    # 缺点：XLA 可能会在 HBM 中显式创建这些 tensor 的副本，导致显存占用翻倍。
-    # 验证：如果你把 K 设得极大（如 50万），会报 HBM OOM，因为 XLA 试图把整个转置矩阵存下来。
-    # 真正的 Zero-Copy 优化需要更复杂的 index_map (直接算 stride)，这留给进阶读者探索。
+    # --- 1. Reshape Only (Zero Copy) ---
+    # Reshape 操作只是改变了数据的视图 (View)，我们只改变看待数据的视角，不移动任何数据
+    # A: (M_Grid, BM, K_Grid, BK)
+    a_view = a.reshape(M // BM, BM, K // BK, BK)
+
+    # B: (K_Grid, BK, N_Grid, BN)
+    b_view = b.reshape(K // BK, BK, N // BN, BN)
 
     m_grid = a_view.shape[0]
-    n_grid = b_view.shape[1]
-    k_grid = a_view.shape[1]  # 或 b_view.shape[0]
+    n_grid = b_view.shape[2]
+    k_grid = b_view.shape[0]
 
     # --- 2. Define BlockSpecs ---
 
-    # Spec A: 选取整行 K Blocks
+    # Spec A:
+    # Input: (M_Grid, BM, K_Grid, BK)
+    # 我们要锁定 M_Grid=i, 取所有的 BM, K_Grid, BK
+    # Mapping: (i, j) -> (i, 0, 0, 0)
+    # Shape: (1, BM, K_Grid, BK)
     in_spec_a = pl.BlockSpec(
-        index_map=lambda i, _: (i, 0, 0, 0), block_shape=(1, k_grid, BM, BK)
+        index_map=lambda i, _: (i, 0, 0, 0), block_shape=(1, BM, k_grid, BK)
     )
 
-    # Spec B: 选取整列 K Blocks
+    # Spec B:
+    # Input: (K_Grid, BK, N_Grid, BN)
+    # 我们要锁定 N_Grid=j, 取所有的 K_Grid, BK, BN
+    # Mapping: (i, j) -> (0, 0, j, 0)
+    # Shape: (K_Grid, BK, 1, BN)
     in_spec_b = pl.BlockSpec(
-        index_map=lambda _, j: (0, j, 0, 0), block_shape=(k_grid, 1, BK, BN)
+        index_map=lambda _, j: (0, 0, j, 0), block_shape=(k_grid, BK, 1, BN)
     )
 
-    # Spec C: 输出一个 Tile
+    # Spec C:
+    # Output: (M_Grid, BM, N_Grid, BN)
     out_spec = pl.BlockSpec(
-        index_map=lambda i, j: (i, j, 0, 0), block_shape=(1, 1, BM, BN)
+        index_map=lambda i, j: (i, 0, j, 0), block_shape=(1, BM, 1, BN)
     )
 
     # --- 3. Execute ---
+    # Output Shape 也要对应 Reshape 后的布局
     c_view = pl.pallas_call(
         matmul_kernel,
-        out_shape=jax.ShapeDtypeStruct((m_grid, n_grid, BM, BN), a.dtype),
+        out_shape=jax.ShapeDtypeStruct((m_grid, BM, n_grid, BN), a.dtype),
         in_specs=(in_spec_a, in_spec_b),
         out_specs=out_spec,
         grid=(m_grid, n_grid),
     )(a_view, b_view)
 
     # --- 4. Restore Shape ---
-    return c_view.transpose(0, 2, 1, 3).reshape(M, N)
+    # C 是 (M_Grid, BM, N_Grid, BN) -> reshape -> (M, N)
+    return c_view.reshape(M, N)
 
 
 # --- Verification ---
@@ -234,10 +234,171 @@ c_jax = jnp.matmul(a, b)
 
 print(f"Max Diff: {jnp.max(jnp.abs(c_pallas - c_jax)):.6f}")
 
+
 # %% [markdown]
 # ---
 #
-# ## Part 5: 总结与伏笔
+# ## Part 5: 实验验证 —— Pallas 的内存行为大揭秘
+#
+# 在 Part 4 的代码中，我们留下了一个悬念：我们将 `BlockSpec` 定义为包含**整个 $K$ 维度**。
+# 这意味着，逻辑上不仅 $BM, BN$ 在 Block 里，连巨大的 $K$ 也在 Block 的定义里。
+#
+# **灵魂拷问**：
+# > 既然 Block 对应 SRAM，而 SRAM 只有几百 KB。为什么当我们把 $K$ 设为几万（几百 MB 数据）时，SRAM 没有被撑爆？
+#
+# 为了回答这个问题，我们设计了一组**“双盲压力测试”**。
+#
+# ### 5.1 实验 A：挑战显存 (HBM) 极限
+# **测试逻辑**：保持 `BK=32` 不变（即每次循环只读 32 个数），疯狂增加总长度 $K$。
+
+
+# %%
+def stress_test_hbm_limit():
+    print("\n--- Experiment A: Stressing HBM (Increasing Total K) ---")
+    M, N = 1024, 1024
+
+    current_k = 65536  # 起步就是 6.5万
+
+    while True:
+        try:
+            print(f"Testing K={current_k}...", end=" ")
+            # 只分配数据，尚未触发 Kernel
+            a = jax.random.normal(jax.random.PRNGKey(0), (M, current_k))
+            b = jax.random.normal(jax.random.PRNGKey(1), (current_k, N))
+
+            # 运行 Kernel
+            run_pallas_matmul(a, b).block_until_ready()
+            print(
+                f"Success! (Total Matrix Size: {a.nbytes / 1e9 + b.nbytes / 1e9:.2f} GB)"
+            )
+
+            current_k *= 2  # 压力翻倍
+
+        except Exception as e:
+            print(f"\n[FAILED] at K={current_k}")
+            if "RESOURCE_EXHAUSTED" in str(e) or "allocator" in str(e):
+                print(">> 错误类型: Global Memory (HBM) OOM")
+                print(">> 结论: 数据量太大，HBM装不下了。但 SRAM 没爆。")
+            else:
+                print(f">> 错误: {e}")
+            break
+
+
+stress_test_hbm_limit()
+
+
+# %% [markdown]
+# **实验结果与日志分析**：
+# 直到 $K$ 增加到几十万，导致单张矩阵大小达到数GB时，程序崩溃：
+# ```text
+# [FAILED] at K=524288
+# >> 错误: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 2.00GiB.
+# ... Allocator (GPU_0_bfc) ran out of memory ...
+# ```
+#
+# **解读**：
+# 1.  **凶手是 `GPU_0_bfc`**：这是 JAX 管理 **HBM (显存)** 的分配器。说明是显存条上的空间不够用了（或者碎片化太严重，找不到连续的 2GB 空间）。
+# 2.  **SRAM 的不在场证明**：如果 BlockSpec 真的试图把这 2GB 数据塞进 SRAM，早在 $K$ 刚开始增加时，就已经触发 `Shared memory size limit` 了。
+# 3.  **结论**：`Ref` 在 $K$ 维度是**流式 (Streaming)** 的。虽然 BlockSpec 写了整个 $K$，但实际进入 SRAM 的只有循环当前的 $BK$。
+#
+# ### 5.2 实验 B：挑战片上内存 (SRAM) 极限
+# **测试逻辑**：保持总长度 $K$ 不变，疯狂增加 `BK`（单次循环读取的数据量）。
+# 理论上，如果 `Ref` 的数据是驻留在 SRAM 里的，那么稍微增加 `BK` 就会立即触碰物理天花板。
+
+
+# %%
+def stress_test_sram_limit():
+    print("\n--- Experiment B: Stressing SRAM (Increasing Tile Size BK) ---")
+    M, N, K = 1024, 1024, 4096  # 固定一个较小的 K
+    k1, k2 = jax.random.split(jax.random.PRNGKey(42))
+    a = jax.random.normal(k1, (M, K))
+    b = jax.random.normal(k2, (K, N))
+
+    def run_pallas_matmul_dynamic_bk(a, b, bk=None):
+        M, K = a.shape
+        K, N = b.shape
+        BM, BN = 128, 128
+        BK = bk if bk is not None else 32
+
+        a_view = a.reshape(M // BM, BM, K // BK, BK)
+        b_view = b.reshape(K // BK, BK, N // BN, BN)
+
+        m_grid = a_view.shape[0]
+        n_grid = b_view.shape[2]
+        k_grid = b_view.shape[0]
+
+        in_spec_a = pl.BlockSpec(
+            index_map=lambda i, _: (i, 0, 0, 0), block_shape=(1, BM, k_grid, BK)
+        )
+        in_spec_b = pl.BlockSpec(
+            index_map=lambda _, j: (0, 0, j, 0), block_shape=(k_grid, BK, 1, BN)
+        )
+        out_spec = pl.BlockSpec(
+            index_map=lambda i, j: (i, 0, j, 0), block_shape=(1, BM, 1, BN)
+        )
+
+        c_view = pl.pallas_call(
+            matmul_kernel,
+            out_shape=jax.ShapeDtypeStruct((m_grid, BM, n_grid, BN), a.dtype),
+            in_specs=(in_spec_a, in_spec_b),
+            out_specs=out_spec,
+            grid=(m_grid, n_grid),
+        )(a_view, b_view)
+
+        return c_view.reshape(M, N)
+
+    # 逐渐增大 BK
+    for bk_test in [16, 32, 64, 128, 256, 512, 1024]:
+        try:
+            print(f"Testing BK={bk_test}...", end=" ")
+
+            run_pallas_matmul_dynamic_bk(a, b, bk=bk_test)
+
+            # 估算 SRAM 占用: 两个输入块 (BM*BK + BK*BN) + 一个累加器 (BM*BN)
+            # float32 = 4 bytes
+            sram_usage = (128 * bk_test + bk_test * 128 + 128 * 128) * 4 / 1024
+            print(f"Success! (Est. SRAM usage: {sram_usage:.1f} KB)")
+
+        except Exception as e:
+            print(f"\n[FAILED] at BK={bk_test}")
+            # Pallas/XLA 通常会报 Shared Memory 相关的错误
+            print(f">> 错误信息摘要: {str(e)[:200]}...")
+            print(">> 结论: Tile 太大，SRAM (Shared Memory) 立即爆炸。")
+            break
+
+
+stress_test_sram_limit()
+
+# %% [markdown]
+# **实验结果**：
+# 当 `BK` 增加到 64 时，立即触发了报错：
+# ```text
+# Testing BK=32... Success! (Est. SRAM usage: 96.0 KB)
+# Testing BK=64...
+# [FAILED] at BK=64
+# >> 错误信息摘要: RESOURCE_EXHAUSTED: Shared memory size limit exceeded: requested 131072, available: 101376...
+# ```
+#
+# **解读**：
+# 1.  **精准的阈值**：`BK=64` 时，仅输入数据就会占用 $128 \times 64 \times 4 \text{Bytes} \times 2 \approx 64 \text{KB}$，加上输出 block 和其他开销，瞬间突破了该 GPU 具体的 Shared Memory 限制（100KB 左右）。
+# 2.  **结论**：**Block 维度是驻留 (Resident) 的**。你定义了多大的 Block，就必须有这么大的 SRAM。
+#
+# ### 5.3 结论
+#
+# 这两个实验如同两块拼图，拼出了 Pallas 内存管理的完整图景：
+#
+# 1.  **BlockSpec 的“谎言”**：
+#     当我们定义 `block_shape` 时，Pallas 并没有把所有定义的数据都塞进 SRAM。它不仅看 Shape，还看你在 Kernel 里**怎么用**。
+#
+# 2.  **Kernel 的“真相”**：
+#     *   **Grid 维度 (M, N, K_grid)**：存在于 **HBM**。访问它们就像翻书，翻到哪一页，哪一页才会被加载。
+#     *   **Loop 步长 (BK)**：存在于 **SRAM**。这是你眼睛一次能看到的页面大小。必须物理上容纳得下，否则直接报错。
+#
+# 这也解释了为什么我们在 Part 4 的代码是安全的，但也指出了优化的方向：既然 $K$ 是流式的，我们是否可以利用这个特性进行 **Pipeline（流水线）** 优化，掩盖读取 $BK$ 的时间？
+#
+# ---
+#
+# ## Part 6: 总结与伏笔
 #
 # 今天我们通过**算术强度**的理论推导，证明了 $BM, BN$ 的大小是 MatMul 性能的关键。
 #
