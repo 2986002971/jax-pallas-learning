@@ -343,8 +343,6 @@ res3 = static_loop_function(x, 10)
 
 让我们来看看 `jax._src.core.Tracer` 的核心源码片段：
 
-# jax/_src/core.py (精简版)
-
 class Tracer(TracerBase):
     # ... 省略 ...
 
