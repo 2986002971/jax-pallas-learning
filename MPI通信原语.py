@@ -284,11 +284,11 @@ spec_Y = P("data", None, None)
 
 
 # %% [markdown]
-# ### 4.3 尸检现场：HLO 代码分析
+# ### 4.3 HLO 代码分析
 #
 # 现在我们定义计算函数，并让 JAX 编译它。我们将深入 **StableHLO** 代码，寻找编译器插入通信算子的铁证。
 #
-
+#
 
 # %%
 # 1. 定义计算图
@@ -348,92 +348,6 @@ else:
 #     *   设备 4,5,6,7 组成了另一个通信组。
 #     *   这说明 AllReduce 只发生在 `model` 轴内部，这正是**张量并行**的特征（只在模型并行的组内同步，不需要跨数据并行组同步）。
 #
-# ### Part 4.5: 进阶实验 —— 逼迫编译器做 "ReduceScatter"
-#
-# 在上一节的 HLO 分析结果中，你可能产生了一个疑问：
-# > *“矩阵乘法 $Y = X @ W$，既然把收缩维（Hidden Dim）切开了，理论上只需要把各卡的结果加起来 (**Reduce**) 不就行了吗？为什么要 **All(所有人)** 都拿到结果？”*
-#
-# 非常敏锐！实际上，这是因为我们在定义输出 `spec_Y` 时，悄悄告诉编译器：“我希望 $Y$ 在所有卡上都是完整的（Replicated）”。
-#
-# **如果我们改变意图，告诉编译器：“我不介意 $Y$ 是切散的，我只要每人拿一部分就行”，奇迹就会发生。**
-#
-# 让我们修改输出的切分策略 (`spec_Y`)，再次审视 HLO。
-#
-# #### 4.5.1 修改切分策略
-#
-# 我们将输出 $Y$ 的最后一个维度（`Out` 维）切分给 `"model"` 轴。这意味着计算结果不需要拼成完整的，而是保持“每人拿一段”的状态。
-
-# %%
-# --- 保持之前的输入定义不变 ---
-# spec_X = P("data", None, "model")
-# spec_W = P("model", None)
-
-print("\n=== 实验 2: 逼迫编译器使用 ReduceScatter ===")
-
-# 修改点：将输出 Y 也切分！
-# 原来是: P("data", None, None) -> 意味着结果要复制，大家都一样
-# 现在是: P("data", None, "model") -> 意味着结果也被切开了
-spec_Y_scattered = P("data", None, "model")
-
-
-@jax.jit(
-    in_shardings=(NamedSharding(mesh, spec_X), NamedSharding(mesh, spec_W)),
-    out_shardings=NamedSharding(mesh, spec_Y_scattered),  # <--- 注意这里
-)
-def scattered_matmul(x, w):
-    return jnp.dot(x, w)
-
-
-# 编译并获取 HLO
-lowered_scatter = scattered_matmul.lower(x_dummy, w_dummy)
-hlo_text_scatter = lowered_scatter.compile().as_text()
-
-# 再次侦测通信指令
-found_ops_scatter = []
-for line in hlo_text_scatter.splitlines():
-    if "reduce-scatter" in line:
-        # 过滤掉一些无关信息，只打印关键部分
-        print(f"✅ 成功发现指令: {line.strip()[:80]}...")
-        found_ops_scatter.append(line)
-
-if not found_ops_scatter:
-    # 如果没找到 reduce-scatter，有可能还是 all-reduce，说明编译器觉得那样更快
-    # 但在这个简单场景下，通常会变成 reduce-scatter
-    print("⚠️ 未发现 reduce-scatter，编译器可能选择了其他策略。")
-    # 我们可以打印看看有没有 all-reduce
-    if any("all-reduce" in line for line in hlo_text_scatter.splitlines()):
-        print("   -> 依然发现了 all-reduce。")
-
-print(f"\n[分析结果]:{hlo_text_scatter}")
-# %% [markdown]
-# #### 4.5.2 结果判定
-#
-# 如果你运行这段代码，你应该会看到编译器的行为发生了改变：
-#
-# ```text
-# ✅ 成功发现指令: %reduce-scatter = f32[2,128,128] reduce-scatter(...)
-# ```
-#
-# **发生了什么？**
-# 1.  **ReduceScatter** 替代了 **AllReduce**。
-# 2.  **通信量减半**：根据我们在 Part 2 和 Part 3 的推导，ReduceScatter 只做了前半段工作，通信量只有 AllReduce 的一半！
-# 3.  **内存节省**：输出 $Y$ 不再是完整的 `[Batch, Seq, Out]`，每张卡只需要存储 `[Batch, Seq, Out / 8]`。显存占用瞬间减少。
-#
-# #### 4.5.3 深度思考：为什么这很重要？
-#
-# 这不仅仅是为了省一点通信量。这其实演示了现代大模型训练中最重要的一种优化技术 —— **序列并行 (Sequence Parallelism) 的雏形**。
-#
-# 在像 Megatron-LM 这样的架构中，我们经常能看到这样的操作：
-# 1.  **Row Parallel Linear**: 权重被切分，产生 Partial Sum。
-# 2.  **强制 ReduceScatter**: 不做 AllReduce，而是通过 PartitionSpec 让结果保持切分状态。
-# 3.  **后续计算**: 直接在切分的数据上做 ReLU、Dropout 等操作（反正这些操作是 Element-wise 的，不需要看邻居的数据）。
-# 4.  **最后**: 直到必须要全量数据时（比如下一层矩阵乘法的输入要求），再想办法聚合。
-#
-# **结论**：
-# JAX 的编译器并非死板地执行命令，它是一个极度听话的“执行者”。你通过 `PartitionSpec` 定义的**数据布局 (Layout)**，直接决定了底层通信算子的**种类**。
-#
-# **“数据流向哪里，通信就发生在何处。”**
-#
 # ---
 #
 # ## Part 5: 总结
@@ -446,7 +360,3 @@ print(f"\n[分析结果]:{hlo_text_scatter}")
 # 这就像你要寄快递。
 # 在 MPI 时代，你需要自己根据地图规划卡车路线（Ring Algorithm）。
 # 在 JAX 时代，你只需要填写“收件地址”（PartitionSpec），顺丰（XLA）会自动帮你搞定所有的物流调度。
-#
-# **Next Level:**
-# 搞定了**计算 (Day 10)** 和 **通信 (Day 11)**，我们终于拥有了训练大模型的两块基石。
-# 在 **Day 12** 中，我们将把它们结合起来，挑战大模型训练中最著名的那个算法——**FlashAttention**。我们将看到计算和显存访问是如何在微观层面博弈的。
